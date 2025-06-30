@@ -26,11 +26,9 @@ user_cancel = {}
 
 def is_homepage_url(url):
     parsed = urlparse(url)
-    # Chuẩn hóa: domain.com, domain.com/ hoặc domain.com?...
     path = parsed.path.rstrip('/')
     if not path and (not parsed.query and not parsed.fragment):
         return True
-    # Ngoài ra, nếu path chỉ là '/' hoặc rỗng, đều coi là homepage
     return path == ''
 
 def get_homepage_id():
@@ -48,12 +46,10 @@ def get_homepage_id():
 
 def get_id_from_url(url, type_):
     if type_ in ["post", "page"]:
-        # Nếu là url trang chủ, lấy ID page_on_front
         if is_homepage_url(url):
             homepage_id = get_homepage_id()
             if homepage_id:
                 return homepage_id
-            # Nếu không có homepage, return None
         slug = urlparse(url).path.rstrip('/').split('/')[-1]
         api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s"
         params = {"per_page": 1, "slug": slug}
@@ -92,7 +88,6 @@ def update_schema(item_id, script_schema, type_):
         api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s/{item_id}"
 
         if script_schema == "":
-            # Xóa: set meta về rỗng
             payload = {
                 "meta": {
                     "_inpost_head_script": {
@@ -102,7 +97,6 @@ def update_schema(item_id, script_schema, type_):
             }
         else:
             old_schema = get_current_schema(item_id, type_)
-            # Nếu nội dung cũ khác nội dung mới thì cộng thêm, còn trùng thì giữ nguyên
             if old_schema and script_schema in old_schema:
                 new_schema = old_schema
             elif old_schema:
@@ -129,14 +123,30 @@ def update_schema(item_id, script_schema, type_):
             return False, error_detail
 
     elif type_ == "category":
-        # PATCH CHỈ FIELD meta.category_schema, không PATCH toàn bộ object
         api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories/{item_id}"
+
+        # Bước 1: GET lại HTML description gốc
+        get_resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        html_description = ""
+        if get_resp.status_code == 200:
+            data = get_resp.json()
+            html_description = data.get("description", "")
+
+        # Bước 2: PATCH meta để chèn script
         payload = {
             "meta": {
                 "category_schema": script_schema
             }
         }
         patch_resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+
+        # Bước 3: PATCH lại chính xác field description về giá trị HTML cũ
+        fix_payload = {
+            "description": html_description
+        }
+        fix_resp = requests.patch(api_endpoint, json=fix_payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+
+        # Chỉ quan tâm PATCH meta thành công là OK, PATCH description "bảo hiểm"
         if patch_resp.status_code == 200:
             return True, None
         else:
@@ -145,6 +155,7 @@ def update_schema(item_id, script_schema, type_):
             except Exception:
                 error_detail = patch_resp.text
             return False, error_detail
+
     else:
         return False, f"Loại '{type_}' không hỗ trợ"
 
