@@ -63,7 +63,7 @@ def update_schema(item_id, script_schema, type_):
         script_schema = script_schema.strip()
         if old_schema and script_schema in old_schema:
             new_schema = old_schema
-        elif old_schema:
+        elif old_schema and script_schema:
             new_schema = (old_schema.rstrip() + "\n" + script_schema)
         else:
             new_schema = script_schema
@@ -113,11 +113,14 @@ def update_schema(item_id, script_schema, type_):
     else:
         return False, f"Loại '{type_}' không hỗ trợ"
 
-def process_excel(file_path, send_log=None, cancel_flag=None):
+def process_excel(file_path, send_log=None, cancel_flag=None, delete_mode=False):
     df = pd.read_excel(file_path)
-    # Bắt buộc đủ 3 cột
-    if not {'url', 'script_schema', 'type'}.issubset(df.columns):
-        raise Exception("File Excel phải có 3 cột: 'url', 'script_schema', 'type' (post/page/category)")
+    require_cols = {'url', 'type'} if delete_mode else {'url', 'script_schema', 'type'}
+    if not require_cols.issubset(df.columns):
+        raise Exception(
+            "File Excel phải có cột: 'url', 'type'" +
+            ("" if delete_mode else ", 'script_schema'")
+        )
 
     results = []
     for idx, row in df.iterrows():
@@ -127,8 +130,8 @@ def process_excel(file_path, send_log=None, cancel_flag=None):
             break
 
         url = row['url']
-        schema = row['script_schema']
         type_ = row['type'].strip().lower()
+        schema = "" if delete_mode else row['script_schema']
         item_id = get_id_from_url(url, type_)
 
         if not item_id:
@@ -138,10 +141,11 @@ def process_excel(file_path, send_log=None, cancel_flag=None):
             continue
         ok, detail = update_schema(item_id, schema, type_)
         if ok:
-            msg = f"[{idx+1}] ✅ Đã cập nhật schema cho {type_} ID {item_id}"
+            action = "Xoá" if delete_mode else "Cập nhật"
+            msg = f"[{idx+1}] ✅ {action} schema cho {type_} ID {item_id} thành công"
             result = "Thành công"
         else:
-            msg = f"[{idx+1}] ❌ Lỗi khi cập nhật schema cho {type_} ID {item_id}"
+            msg = f"[{idx+1}] ❌ Lỗi khi {('xoá' if delete_mode else 'cập nhật')} schema cho {type_} ID {item_id}"
             result = f"Lỗi: {detail}"
             if send_log: send_log(f"[{idx+1}] ⚠️ Chi tiết lỗi: {detail}")
         if send_log: send_log(msg)
@@ -188,6 +192,43 @@ async def chencode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Lỗi khi nhận file: {e}")
 
+async def xoascript(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in user_task and not user_task[user_id].done():
+        await update.message.reply_text("Bạn đang có tiến trình chưa hoàn thành! Gõ /cancel để hủy hoặc đợi hoàn tất.")
+        return
+
+    await update.message.reply_text(
+        "Gửi file Excel (.xlsx) gồm 2 cột: url, type (post/page/category) để xoá schema. "
+        "Gõ /cancel để dừng lại nếu muốn."
+    )
+    user_cancel[user_id] = False
+
+    try:
+        for _ in range(30):
+            await asyncio.sleep(1)
+            if user_id in context.chat_data and 'pending_file' in context.chat_data[user_id]:
+                break
+            if user_cancel.get(user_id, False):
+                await update.message.reply_text("Đã hủy tiến trình theo yêu cầu của bạn.")
+                return
+        else:
+            await update.message.reply_text("Bạn không gửi file đúng thời gian, lệnh đã bị hủy.")
+            return
+
+        document = context.chat_data[user_id].pop('pending_file')
+        file = await context.bot.get_file(document.file_id)
+        filename = f"/tmp/{datetime.now().strftime('%Y%m%d%H%M%S')}_{document.file_name}"
+        await file.download_to_drive(filename)
+        await update.message.reply_text("File đã nhận. Đang xử lý xóa script, bạn chờ chút...")
+
+        task = asyncio.create_task(handle_process_excel(update, context, filename, user_id, delete_mode=True))
+        user_task[user_id] = task
+        await task
+
+    except Exception as e:
+        await update.message.reply_text(f"Lỗi khi nhận file: {e}")
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_cancel.get(user_id, False):
@@ -196,7 +237,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data[user_id] = {}
     context.chat_data[user_id]['pending_file'] = update.message.document
 
-async def handle_process_excel(update, context, file_path, user_id):
+async def handle_process_excel(update, context, file_path, user_id, delete_mode=False):
     log_messages = []
     async def send_log(msg):
         await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
@@ -208,7 +249,12 @@ async def handle_process_excel(update, context, file_path, user_id):
     try:
         df_result = await loop.run_in_executor(
             None,
-            lambda: process_excel(file_path, send_log=lambda m: asyncio.run_coroutine_threadsafe(send_log(m), loop), cancel_flag=cancel_flag)
+            lambda: process_excel(
+                file_path,
+                send_log=lambda m: asyncio.run_coroutine_threadsafe(send_log(m), loop),
+                cancel_flag=cancel_flag,
+                delete_mode=delete_mode
+            )
         )
         out_file = f"/tmp/result_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
         df_result.to_excel(out_file, index=False)
@@ -231,6 +277,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("chencode", chencode))
+    app.add_handler(CommandHandler("xoascript", xoascript))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     print("Bot đã sẵn sàng!")
