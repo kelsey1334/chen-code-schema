@@ -58,24 +58,37 @@ def get_current_schema(post_id, type_):
     return ''
 
 def update_schema(item_id, script_schema, type_):
+    script_schema = script_schema.strip() if script_schema else ""
     if type_ in ["post", "page"]:
-        old_schema = get_current_schema(item_id, type_)
-        script_schema = script_schema.strip()
-        if old_schema and script_schema in old_schema:
-            new_schema = old_schema
-        elif old_schema and script_schema:
-            new_schema = (old_schema.rstrip() + "\n" + script_schema)
-        else:
-            new_schema = script_schema
-
         api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s/{item_id}"
-        payload = {
-            "meta": {
-                "_inpost_head_script": {
-                    "synth_header_script": new_schema
+
+        if script_schema == "":
+            # Xóa: set meta về rỗng
+            payload = {
+                "meta": {
+                    "_inpost_head_script": {
+                        "synth_header_script": ""
+                    }
                 }
             }
-        }
+        else:
+            old_schema = get_current_schema(item_id, type_)
+            # Nếu nội dung cũ khác nội dung mới thì cộng thêm, còn trùng thì giữ nguyên
+            if old_schema and script_schema in old_schema:
+                new_schema = old_schema
+            elif old_schema:
+                new_schema = (old_schema.rstrip() + "\n" + script_schema)
+            else:
+                new_schema = script_schema
+
+            payload = {
+                "meta": {
+                    "_inpost_head_script": {
+                        "synth_header_script": new_schema
+                    }
+                }
+            }
+
         resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
         if resp.status_code == 200:
             return True, None
@@ -87,20 +100,16 @@ def update_schema(item_id, script_schema, type_):
             return False, error_detail
 
     elif type_ == "category":
-        # Lấy lại toàn bộ thông tin category hiện tại!
         api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories/{item_id}"
         get_resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
         if get_resp.status_code != 200:
             return False, f"Lỗi khi GET thông tin category: {get_resp.text}"
         data = get_resp.json()
-        # Lấy lại toàn bộ field mặc định (không lấy _links)
         safe_fields = {}
         for field in ["name", "slug", "description", "parent", "meta"]:
             safe_fields[field] = data.get(field)
-        # Cập nhật schema mới
         safe_fields["meta"] = safe_fields.get("meta", {}) or {}
-        safe_fields["meta"]["category_schema"] = script_schema.strip()
-        # PATCH với toàn bộ data
+        safe_fields["meta"]["category_schema"] = script_schema
         patch_resp = requests.patch(api_endpoint, json=safe_fields, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
         if patch_resp.status_code == 200:
             return True, None
@@ -160,82 +169,46 @@ async def chencode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in user_task and not user_task[user_id].done():
         await update.message.reply_text("Bạn đang có tiến trình chưa hoàn thành! Gõ /cancel để hủy hoặc đợi hoàn tất.")
         return
-
+    context.chat_data[user_id] = {'waiting_for_file': 'chencode'}
     await update.message.reply_text(
-        "Gửi file Excel (.xlsx) gồm 3 cột: url, script_schema, type (post/page/category). "
-        "Gõ /cancel để dừng lại nếu muốn."
+        "Gửi file Excel (.xlsx) gồm 3 cột: url, script_schema, type (post/page/category). Gõ /cancel để dừng lại nếu muốn."
     )
-    user_cancel[user_id] = False
-
-    try:
-        for _ in range(30):
-            await asyncio.sleep(1)
-            if user_id in context.chat_data and 'pending_file' in context.chat_data[user_id]:
-                break
-            if user_cancel.get(user_id, False):
-                await update.message.reply_text("Đã hủy tiến trình theo yêu cầu của bạn.")
-                return
-        else:
-            await update.message.reply_text("Bạn không gửi file đúng thời gian, lệnh đã bị hủy.")
-            return
-
-        document = context.chat_data[user_id].pop('pending_file')
-        file = await context.bot.get_file(document.file_id)
-        filename = f"/tmp/{datetime.now().strftime('%Y%m%d%H%M%S')}_{document.file_name}"
-        await file.download_to_drive(filename)
-        await update.message.reply_text("File đã nhận. Đang xử lý, bạn chờ chút...")
-
-        task = asyncio.create_task(handle_process_excel(update, context, filename, user_id))
-        user_task[user_id] = task
-        await task
-
-    except Exception as e:
-        await update.message.reply_text(f"Lỗi khi nhận file: {e}")
 
 async def xoascript(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in user_task and not user_task[user_id].done():
         await update.message.reply_text("Bạn đang có tiến trình chưa hoàn thành! Gõ /cancel để hủy hoặc đợi hoàn tất.")
         return
-
+    context.chat_data[user_id] = {'waiting_for_file': 'xoascript'}
     await update.message.reply_text(
-        "Gửi file Excel (.xlsx) gồm 2 cột: url, type (post/page/category) để xoá schema. "
-        "Gõ /cancel để dừng lại nếu muốn."
+        "Gửi file Excel (.xlsx) gồm 2 cột: url, type (post/page/category) để xoá schema. Gõ /cancel để dừng lại nếu muốn."
     )
-    user_cancel[user_id] = False
-
-    try:
-        for _ in range(30):
-            await asyncio.sleep(1)
-            if user_id in context.chat_data and 'pending_file' in context.chat_data[user_id]:
-                break
-            if user_cancel.get(user_id, False):
-                await update.message.reply_text("Đã hủy tiến trình theo yêu cầu của bạn.")
-                return
-        else:
-            await update.message.reply_text("Bạn không gửi file đúng thời gian, lệnh đã bị hủy.")
-            return
-
-        document = context.chat_data[user_id].pop('pending_file')
-        file = await context.bot.get_file(document.file_id)
-        filename = f"/tmp/{datetime.now().strftime('%Y%m%d%H%M%S')}_{document.file_name}"
-        await file.download_to_drive(filename)
-        await update.message.reply_text("File đã nhận. Đang xử lý xóa script, bạn chờ chút...")
-
-        task = asyncio.create_task(handle_process_excel(update, context, filename, user_id, delete_mode=True))
-        user_task[user_id] = task
-        await task
-
-    except Exception as e:
-        await update.message.reply_text(f"Lỗi khi nhận file: {e}")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_cancel.get(user_id, False):
+    user_state = context.chat_data.get(user_id, {})
+    waiting = user_state.get('waiting_for_file')
+    if not waiting:
+        await update.message.reply_text("Bạn phải dùng lệnh /chencode hoặc /xoascript trước khi gửi file.")
         return
-    if user_id not in context.chat_data:
-        context.chat_data[user_id] = {}
-    context.chat_data[user_id]['pending_file'] = update.message.document
+
+    document = update.message.document
+    file = await context.bot.get_file(document.file_id)
+    filename = f"/tmp/{datetime.now().strftime('%Y%m%d%H%M%S')}_{document.file_name}"
+    await file.download_to_drive(filename)
+    await update.message.reply_text("File đã nhận. Đang xử lý, bạn chờ chút...")
+
+    # Clear flag
+    context.chat_data[user_id]['waiting_for_file'] = None
+
+    # Tạo và chạy task tương ứng
+    task = None
+    if waiting == 'chencode':
+        task = asyncio.create_task(handle_process_excel(update, context, filename, user_id))
+    elif waiting == 'xoascript':
+        task = asyncio.create_task(handle_process_excel(update, context, filename, user_id, delete_mode=True))
+    user_task[user_id] = task
+    await task
 
 async def handle_process_excel(update, context, file_path, user_id, delete_mode=False):
     log_messages = []
@@ -268,11 +241,12 @@ async def handle_process_excel(update, context, file_path, user_id, delete_mode=
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    context.chat_data[user_id] = {}
     if user_id in user_task and not user_task[user_id].done():
         user_cancel[user_id] = True
         await update.message.reply_text("Đã gửi yêu cầu hủy tiến trình của bạn. Đang dừng...")
     else:
-        await update.message.reply_text("Bạn không có tiến trình nào đang chạy!")
+        await update.message.reply_text("Bạn không có tiến trình nào đang chạy hoặc chưa gửi file!")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
