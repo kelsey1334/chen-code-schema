@@ -49,7 +49,7 @@ def get_current_schema(post_id):
                 return inpost.get('synth_header_script', '') or ''
     return ''
 
-# ---- Hàm update schema (nối thêm vào cuối) ----
+# ---- Hàm update schema (nối thêm vào cuối, trả về lỗi chi tiết nếu có) ----
 def update_schema(post_id, script_schema):
     old_schema = get_current_schema(post_id)
     script_schema = script_schema.strip()
@@ -72,8 +72,14 @@ def update_schema(post_id, script_schema):
         }
         resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
         if resp.status_code == 200:
-            return True
-    return False
+            return True, None  # Không có lỗi
+        elif resp.status_code != 404:
+            try:
+                error_detail = resp.json()
+            except Exception:
+                error_detail = resp.text
+            return False, error_detail
+    return False, "Không tìm thấy endpoint phù hợp."
 
 # ---- Xử lý file Excel và trả về log kết quả dạng DataFrame ----
 def process_excel(file_path, send_log=None, cancel_flag=None):
@@ -96,13 +102,15 @@ def process_excel(file_path, send_log=None, cancel_flag=None):
             if send_log: send_log(msg)
             results.append({"stt": idx+1, "url": url, "result": "Không tìm thấy post_id"})
             continue
-        ok = update_schema(post_id, schema)
+        ok, detail = update_schema(post_id, schema)
         if ok:
             msg = f"[{idx+1}] ✅ Đã cập nhật schema cho bài viết/trang ID {post_id}"
             result = "Thành công"
         else:
             msg = f"[{idx+1}] ❌ Lỗi khi cập nhật schema cho bài viết/trang ID {post_id}"
-            result = "Lỗi"
+            result = f"Lỗi: {detail}"
+            # Log thêm chi tiết lỗi
+            if send_log: send_log(f"[{idx+1}] ⚠️ Chi tiết lỗi: {detail}")
         if send_log: send_log(msg)
         results.append({"stt": idx+1, "url": url, "result": result})
 
