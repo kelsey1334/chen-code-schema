@@ -24,34 +24,41 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 user_task = {}
 user_cancel = {}
 
-# ---- Hàm lấy post_id từ URL, kiểm tra cả bài viết (post) và trang (page) ----
-def get_post_id_from_url(url):
+def get_id_from_url(url, type_):
     slug = urlparse(url).path.rstrip('/').split('/')[-1]
-    for post_type in ["posts", "pages"]:
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{post_type}"
-        params = {"per_page": 1, "slug": slug}
-        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
-        if resp.status_code == 200 and resp.json():
-            return resp.json()[0]['id']
+    if type_ == "post":
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/posts"
+    elif type_ == "page":
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/pages"
+    elif type_ == "category":
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories"
+    else:
+        return None
+    params = {"per_page": 1, "slug": slug}
+    resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+    if resp.status_code == 200 and resp.json():
+        return resp.json()[0]['id']
     return None
 
-# ---- Hàm lấy nội dung schema hiện tại ----
-def get_current_schema(post_id):
-    # Thử cả posts và pages
-    for post_type in ["posts", "pages"]:
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{post_type}"
-        # Lấy post object
-        resp = requests.get(f"{api_endpoint}/{post_id}", auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+def get_current_schema(post_id, type_):
+    if type_ in ["post", "page"]:
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s/{post_id}"
+        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
         if resp.status_code == 200:
             meta = resp.json().get('meta', {})
             inpost = meta.get('_inpost_head_script', {})
             if isinstance(inpost, dict):
                 return inpost.get('synth_header_script', '') or ''
+    elif type_ == "category":
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories/{post_id}"
+        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        if resp.status_code == 200:
+            meta = resp.json().get('meta', {})
+            return meta.get('category_schema', '') or ''
     return ''
 
-# ---- Hàm update schema (nối thêm vào cuối, trả về lỗi chi tiết nếu có) ----
-def update_schema(post_id, script_schema):
-    old_schema = get_current_schema(post_id)
+def update_schema(item_id, script_schema, type_):
+    old_schema = get_current_schema(item_id, type_)
     script_schema = script_schema.strip()
     if old_schema and script_schema in old_schema:
         new_schema = old_schema
@@ -60,9 +67,8 @@ def update_schema(post_id, script_schema):
     else:
         new_schema = script_schema
 
-    # Thử update cho posts trước, nếu không được thì thử pages
-    for post_type in ["posts", "pages"]:
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{post_type}/{post_id}"
+    if type_ in ["post", "page"]:
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s/{item_id}"
         payload = {
             "meta": {
                 "_inpost_head_script": {
@@ -70,22 +76,31 @@ def update_schema(post_id, script_schema):
                 }
             }
         }
-        resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
-        if resp.status_code == 200:
-            return True, None  # Không có lỗi
-        elif resp.status_code != 404:
-            try:
-                error_detail = resp.json()
-            except Exception:
-                error_detail = resp.text
-            return False, error_detail
-    return False, "Không tìm thấy endpoint phù hợp."
+    elif type_ == "category":
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories/{item_id}"
+        payload = {
+            "meta": {
+                "category_schema": new_schema
+            }
+        }
+    else:
+        return False, f"Loại '{type_}' không hỗ trợ"
 
-# ---- Xử lý file Excel và trả về log kết quả dạng DataFrame ----
+    resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+    if resp.status_code == 200:
+        return True, None
+    else:
+        try:
+            error_detail = resp.json()
+        except Exception:
+            error_detail = resp.text
+        return False, error_detail
+
 def process_excel(file_path, send_log=None, cancel_flag=None):
     df = pd.read_excel(file_path)
-    if not {'url', 'script_schema'}.issubset(df.columns):
-        raise Exception("File Excel phải có 2 cột: 'url' và 'script_schema'")
+    # Bắt buộc đủ 3 cột
+    if not {'url', 'script_schema', 'type'}.issubset(df.columns):
+        raise Exception("File Excel phải có 3 cột: 'url', 'script_schema', 'type' (post/page/category)")
 
     results = []
     for idx, row in df.iterrows():
@@ -96,23 +111,24 @@ def process_excel(file_path, send_log=None, cancel_flag=None):
 
         url = row['url']
         schema = row['script_schema']
-        post_id = get_post_id_from_url(url)
-        if not post_id:
-            msg = f"[{idx+1}] ❌ Không tìm thấy post_id cho URL: {url}"
+        type_ = row['type'].strip().lower()
+        item_id = get_id_from_url(url, type_)
+
+        if not item_id:
+            msg = f"[{idx+1}] ❌ Không tìm thấy ID cho URL: {url} (loại: {type_})"
             if send_log: send_log(msg)
-            results.append({"stt": idx+1, "url": url, "result": "Không tìm thấy post_id"})
+            results.append({"stt": idx+1, "url": url, "type": type_, "result": "Không tìm thấy ID"})
             continue
-        ok, detail = update_schema(post_id, schema)
+        ok, detail = update_schema(item_id, schema, type_)
         if ok:
-            msg = f"[{idx+1}] ✅ Đã cập nhật schema cho bài viết/trang ID {post_id}"
+            msg = f"[{idx+1}] ✅ Đã cập nhật schema cho {type_} ID {item_id}"
             result = "Thành công"
         else:
-            msg = f"[{idx+1}] ❌ Lỗi khi cập nhật schema cho bài viết/trang ID {post_id}"
+            msg = f"[{idx+1}] ❌ Lỗi khi cập nhật schema cho {type_} ID {item_id}"
             result = f"Lỗi: {detail}"
-            # Log thêm chi tiết lỗi
             if send_log: send_log(f"[{idx+1}] ⚠️ Chi tiết lỗi: {detail}")
         if send_log: send_log(msg)
-        results.append({"stt": idx+1, "url": url, "result": result})
+        results.append({"stt": idx+1, "url": url, "type": type_, "result": result})
 
     return pd.DataFrame(results)
 
@@ -124,7 +140,10 @@ async def chencode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Bạn đang có tiến trình chưa hoàn thành! Gõ /cancel để hủy hoặc đợi hoàn tất.")
         return
 
-    await update.message.reply_text("Gửi file Excel (.xlsx) trong vòng 30 giây để bắt đầu chèn schema. Gõ /cancel để dừng lại nếu muốn.")
+    await update.message.reply_text(
+        "Gửi file Excel (.xlsx) gồm 3 cột: url, script_schema, type (post/page/category). "
+        "Gõ /cancel để dừng lại nếu muốn."
+    )
     user_cancel[user_id] = False
 
     try:
