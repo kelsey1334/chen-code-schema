@@ -14,7 +14,7 @@ from datetime import datetime
 
 from requests.auth import HTTPBasicAuth
 
-# Load config
+# Load biến môi trường
 load_dotenv()
 WP_API_URL = os.getenv("WP_API_URL")
 WP_USER = os.getenv("WP_USER")
@@ -24,26 +24,32 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 user_task = {}
 user_cancel = {}
 
-# ---- WordPress REST API functions ----
+# ---- Hàm lấy post_id từ URL, kiểm tra cả bài viết (post) và trang (page) ----
 def get_post_id_from_url(url):
     slug = urlparse(url).path.rstrip('/').split('/')[-1]
-    api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/posts"
-    params = {"per_page": 1, "slug": slug}
-    resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
-    if resp.status_code == 200 and resp.json():
-        return resp.json()[0]['id']
+    for post_type in ["posts", "pages"]:
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{post_type}"
+        params = {"per_page": 1, "slug": slug}
+        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        if resp.status_code == 200 and resp.json():
+            return resp.json()[0]['id']
     return None
 
+# ---- Hàm lấy nội dung schema hiện tại ----
 def get_current_schema(post_id):
-    api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/posts/{post_id}"
-    resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
-    if resp.status_code == 200:
-        meta = resp.json().get('meta', {})
-        inpost = meta.get('_inpost_head_script', {})
-        if isinstance(inpost, dict):
-            return inpost.get('synth_header_script', '') or ''
+    # Thử cả posts và pages
+    for post_type in ["posts", "pages"]:
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{post_type}"
+        # Lấy post object
+        resp = requests.get(f"{api_endpoint}/{post_id}", auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        if resp.status_code == 200:
+            meta = resp.json().get('meta', {})
+            inpost = meta.get('_inpost_head_script', {})
+            if isinstance(inpost, dict):
+                return inpost.get('synth_header_script', '') or ''
     return ''
 
+# ---- Hàm update schema (nối thêm vào cuối) ----
 def update_schema(post_id, script_schema):
     old_schema = get_current_schema(post_id)
     script_schema = script_schema.strip()
@@ -54,17 +60,22 @@ def update_schema(post_id, script_schema):
     else:
         new_schema = script_schema
 
-    api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/posts/{post_id}"
-    payload = {
-        "meta": {
-            "_inpost_head_script": {
-                "synth_header_script": new_schema
+    # Thử update cho posts trước, nếu không được thì thử pages
+    for post_type in ["posts", "pages"]:
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{post_type}/{post_id}"
+        payload = {
+            "meta": {
+                "_inpost_head_script": {
+                    "synth_header_script": new_schema
+                }
             }
         }
-    }
-    resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
-    return resp.status_code == 200
+        resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        if resp.status_code == 200:
+            return True
+    return False
 
+# ---- Xử lý file Excel và trả về log kết quả dạng DataFrame ----
 def process_excel(file_path, send_log=None, cancel_flag=None):
     df = pd.read_excel(file_path)
     if not {'url', 'script_schema'}.issubset(df.columns):
@@ -87,17 +98,17 @@ def process_excel(file_path, send_log=None, cancel_flag=None):
             continue
         ok = update_schema(post_id, schema)
         if ok:
-            msg = f"[{idx+1}] ✅ Đã cập nhật schema cho bài viết ID {post_id}"
+            msg = f"[{idx+1}] ✅ Đã cập nhật schema cho bài viết/trang ID {post_id}"
             result = "Thành công"
         else:
-            msg = f"[{idx+1}] ❌ Lỗi khi cập nhật schema cho bài viết ID {post_id}"
+            msg = f"[{idx+1}] ❌ Lỗi khi cập nhật schema cho bài viết/trang ID {post_id}"
             result = "Lỗi"
         if send_log: send_log(msg)
         results.append({"stt": idx+1, "url": url, "result": result})
 
     return pd.DataFrame(results)
 
-# ----- Telegram Bot logic -----
+# ----- Bot Telegram -----
 
 async def chencode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
