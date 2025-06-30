@@ -58,16 +58,16 @@ def get_current_schema(post_id, type_):
     return ''
 
 def update_schema(item_id, script_schema, type_):
-    old_schema = get_current_schema(item_id, type_)
-    script_schema = script_schema.strip()
-    if old_schema and script_schema in old_schema:
-        new_schema = old_schema
-    elif old_schema:
-        new_schema = (old_schema.rstrip() + "\n" + script_schema)
-    else:
-        new_schema = script_schema
-
     if type_ in ["post", "page"]:
+        old_schema = get_current_schema(item_id, type_)
+        script_schema = script_schema.strip()
+        if old_schema and script_schema in old_schema:
+            new_schema = old_schema
+        elif old_schema:
+            new_schema = (old_schema.rstrip() + "\n" + script_schema)
+        else:
+            new_schema = script_schema
+
         api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s/{item_id}"
         payload = {
             "meta": {
@@ -76,25 +76,42 @@ def update_schema(item_id, script_schema, type_):
                 }
             }
         }
+        resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        if resp.status_code == 200:
+            return True, None
+        else:
+            try:
+                error_detail = resp.json()
+            except Exception:
+                error_detail = resp.text
+            return False, error_detail
+
     elif type_ == "category":
+        # Lấy lại toàn bộ thông tin category hiện tại!
         api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories/{item_id}"
-        payload = {
-            "meta": {
-                "category_schema": new_schema
-            }
-        }
+        get_resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        if get_resp.status_code != 200:
+            return False, f"Lỗi khi GET thông tin category: {get_resp.text}"
+        data = get_resp.json()
+        # Lấy lại toàn bộ field mặc định (không lấy _links)
+        safe_fields = {}
+        for field in ["name", "slug", "description", "parent", "meta"]:
+            safe_fields[field] = data.get(field)
+        # Cập nhật schema mới
+        safe_fields["meta"] = safe_fields.get("meta", {}) or {}
+        safe_fields["meta"]["category_schema"] = script_schema.strip()
+        # PATCH với toàn bộ data
+        patch_resp = requests.patch(api_endpoint, json=safe_fields, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        if patch_resp.status_code == 200:
+            return True, None
+        else:
+            try:
+                error_detail = patch_resp.json()
+            except Exception:
+                error_detail = patch_resp.text
+            return False, error_detail
     else:
         return False, f"Loại '{type_}' không hỗ trợ"
-
-    resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
-    if resp.status_code == 200:
-        return True, None
-    else:
-        try:
-            error_detail = resp.json()
-        except Exception:
-            error_detail = resp.text
-        return False, error_detail
 
 def process_excel(file_path, send_log=None, cancel_flag=None):
     df = pd.read_excel(file_path)
