@@ -24,20 +24,49 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 user_task = {}
 user_cancel = {}
 
+def is_homepage_url(url):
+    parsed = urlparse(url)
+    # Chuẩn hóa: domain.com, domain.com/ hoặc domain.com?...
+    path = parsed.path.rstrip('/')
+    if not path and (not parsed.query and not parsed.fragment):
+        return True
+    # Ngoài ra, nếu path chỉ là '/' hoặc rỗng, đều coi là homepage
+    return path == ''
+
+def get_homepage_id():
+    api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/settings"
+    resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+    if resp.status_code == 200:
+        page_id = resp.json().get('page_on_front', 0)
+        try:
+            page_id = int(page_id)
+        except Exception:
+            page_id = 0
+        if page_id > 0:
+            return page_id
+    return None
+
 def get_id_from_url(url, type_):
-    slug = urlparse(url).path.rstrip('/').split('/')[-1]
-    if type_ == "post":
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/posts"
-    elif type_ == "page":
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/pages"
+    if type_ in ["post", "page"]:
+        # Nếu là url trang chủ, lấy ID page_on_front
+        if is_homepage_url(url):
+            homepage_id = get_homepage_id()
+            if homepage_id:
+                return homepage_id
+            # Nếu không có homepage, return None
+        slug = urlparse(url).path.rstrip('/').split('/')[-1]
+        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s"
+        params = {"per_page": 1, "slug": slug}
+        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        if resp.status_code == 200 and resp.json():
+            return resp.json()[0]['id']
     elif type_ == "category":
+        slug = urlparse(url).path.rstrip('/').split('/')[-1]
         api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories"
-    else:
-        return None
-    params = {"per_page": 1, "slug": slug}
-    resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
-    if resp.status_code == 200 and resp.json():
-        return resp.json()[0]['id']
+        params = {"per_page": 1, "slug": slug}
+        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        if resp.status_code == 200 and resp.json():
+            return resp.json()[0]['id']
     return None
 
 def get_current_schema(post_id, type_):
