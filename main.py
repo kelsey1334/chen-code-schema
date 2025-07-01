@@ -4,7 +4,7 @@ import requests
 import asyncio
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-from telegram import Update, Document
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes
@@ -14,16 +14,46 @@ from datetime import datetime
 
 from requests.auth import HTTPBasicAuth
 
-# Load biến môi trường
+# Load dotenv nếu vẫn cần (có thể giữ lại để bot hoạt động nếu không truyền file)
 load_dotenv()
-WP_API_URL = os.getenv("WP_API_URL")
-WP_USER = os.getenv("WP_USER")
-WP_APP_PASS = os.getenv("WP_APP_PASS")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+DEFAULT_TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 user_task = {}
 user_cancel = {}
 
+# ==== Đọc file Excel gồm 2 sheet: "accounts" và "data" ====
+def read_accounts_and_data(file_path):
+    xls = pd.ExcelFile(file_path)
+    sheet_names = [s.lower() for s in xls.sheet_names]
+    if 'accounts' in sheet_names:
+        accounts_df = pd.read_excel(xls, sheet_name=[n for n in xls.sheet_names if n.lower() == 'accounts'][0])
+    elif 'account' in sheet_names:
+        accounts_df = pd.read_excel(xls, sheet_name=[n for n in xls.sheet_names if n.lower() == 'account'][0])
+    else:
+        raise Exception("Không tìm thấy sheet 'accounts' hoặc 'account' trong file.")
+
+    if 'data' in sheet_names:
+        data_df = pd.read_excel(xls, sheet_name=[n for n in xls.sheet_names if n.lower() == 'data'][0])
+    else:
+        raise Exception("Không tìm thấy sheet 'data' trong file.")
+
+    return accounts_df, data_df
+
+def get_account_dict(accounts_df):
+    """
+    Chuyển sheet account thành dict theo 'site'
+    """
+    acc_dict = {}
+    for _, row in accounts_df.iterrows():
+        key = str(row['site']).strip().lower()
+        acc_dict[key] = {
+            "WP_API_URL": str(row['WP_API_URL']).strip(),
+            "WP_USER": str(row['WP_USER']).strip(),
+            "WP_APP_PASS": str(row['WP_APP_PASS']).strip()
+        }
+    return acc_dict
+
+# ==== Các hàm hỗ trợ nhận account động ====
 def is_homepage_url(url):
     parsed = urlparse(url)
     path = parsed.path.rstrip('/')
@@ -31,9 +61,9 @@ def is_homepage_url(url):
         return True
     return path == ''
 
-def get_homepage_id():
-    api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/settings"
-    resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+def get_homepage_id(account):
+    api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/settings"
+    resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
     if resp.status_code == 200:
         page_id = resp.json().get('page_on_front', 0)
         try:
@@ -44,48 +74,48 @@ def get_homepage_id():
             return page_id
     return None
 
-def get_id_from_url(url, type_):
+def get_id_from_url(url, type_, account):
     if type_ in ["post", "page"]:
         if is_homepage_url(url):
-            homepage_id = get_homepage_id()
+            homepage_id = get_homepage_id(account)
             if homepage_id:
                 return homepage_id
         slug = urlparse(url).path.rstrip('/').split('/')[-1]
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s"
+        api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/{type_}s"
         params = {"per_page": 1, "slug": slug}
-        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
         if resp.status_code == 200 and resp.json():
             return resp.json()[0]['id']
     elif type_ == "category":
         slug = urlparse(url).path.rstrip('/').split('/')[-1]
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories"
+        api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/categories"
         params = {"per_page": 1, "slug": slug}
-        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
         if resp.status_code == 200 and resp.json():
             return resp.json()[0]['id']
     return None
 
-def get_current_schema(post_id, type_):
+def get_current_schema(post_id, type_, account):
     if type_ in ["post", "page"]:
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s/{post_id}"
-        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/{type_}s/{post_id}"
+        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
         if resp.status_code == 200:
             meta = resp.json().get('meta', {})
             inpost = meta.get('_inpost_head_script', {})
             if isinstance(inpost, dict):
                 return inpost.get('synth_header_script', '') or ''
     elif type_ == "category":
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories/{post_id}"
-        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/categories/{post_id}"
+        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
         if resp.status_code == 200:
             meta = resp.json().get('meta', {})
             return meta.get('category_schema', '') or ''
     return ''
 
-def update_schema(item_id, script_schema, type_):
+def update_schema(item_id, script_schema, type_, account):
     script_schema = script_schema.strip() if script_schema else ""
     if type_ in ["post", "page"]:
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/{type_}s/{item_id}"
+        api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/{type_}s/{item_id}"
 
         if script_schema == "":
             payload = {
@@ -96,7 +126,7 @@ def update_schema(item_id, script_schema, type_):
                 }
             }
         else:
-            old_schema = get_current_schema(item_id, type_)
+            old_schema = get_current_schema(item_id, type_, account)
             if old_schema and script_schema in old_schema:
                 new_schema = old_schema
             elif old_schema:
@@ -112,7 +142,7 @@ def update_schema(item_id, script_schema, type_):
                 }
             }
 
-        resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
         if resp.status_code == 200:
             return True, None
         else:
@@ -123,10 +153,10 @@ def update_schema(item_id, script_schema, type_):
             return False, error_detail
 
     elif type_ == "category":
-        api_endpoint = f"{WP_API_URL}/wp-json/wp/v2/categories/{item_id}"
+        api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/categories/{item_id}"
 
         # Bước 1: GET lại HTML description gốc
-        get_resp = requests.get(api_endpoint, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        get_resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
         html_description = ""
         if get_resp.status_code == 200:
             data = get_resp.json()
@@ -138,15 +168,14 @@ def update_schema(item_id, script_schema, type_):
                 "category_schema": script_schema
             }
         }
-        patch_resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        patch_resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
 
         # Bước 3: PATCH lại chính xác field description về giá trị HTML cũ
         fix_payload = {
             "description": html_description
         }
-        fix_resp = requests.patch(api_endpoint, json=fix_payload, auth=HTTPBasicAuth(WP_USER, WP_APP_PASS))
+        fix_resp = requests.patch(api_endpoint, json=fix_payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
 
-        # Chỉ quan tâm PATCH meta thành công là OK, PATCH description "bảo hiểm"
         if patch_resp.status_code == 200:
             return True, None
         else:
@@ -159,17 +188,18 @@ def update_schema(item_id, script_schema, type_):
     else:
         return False, f"Loại '{type_}' không hỗ trợ"
 
-def process_excel(file_path, send_log=None, cancel_flag=None, delete_mode=False):
-    df = pd.read_excel(file_path)
-    require_cols = {'url', 'type'} if delete_mode else {'url', 'script_schema', 'type'}
-    if not require_cols.issubset(df.columns):
+def process_excel_multi_account(file_path, send_log=None, cancel_flag=None, delete_mode=False):
+    accounts_df, data_df = read_accounts_and_data(file_path)
+    accounts_dict = get_account_dict(accounts_df)
+    require_cols = {'url', 'type', 'site'} if delete_mode else {'url', 'script_schema', 'type', 'site'}
+    if not require_cols.issubset(data_df.columns):
         raise Exception(
-            "File Excel phải có cột: 'url', 'type'" +
+            "Sheet 'data' phải có cột: 'url', 'type', 'site'" +
             ("" if delete_mode else ", 'script_schema'")
         )
 
     results = []
-    for idx, row in df.iterrows():
+    for idx, row in data_df.iterrows():
         if cancel_flag and cancel_flag():
             msg = f"🛑 Đã hủy theo yêu cầu của bạn! Đã dừng ở dòng {idx+1}."
             if send_log: send_log(msg)
@@ -177,25 +207,32 @@ def process_excel(file_path, send_log=None, cancel_flag=None, delete_mode=False)
 
         url = row['url']
         type_ = row['type'].strip().lower()
-        schema = "" if delete_mode else row['script_schema']
-        item_id = get_id_from_url(url, type_)
-
-        if not item_id:
-            msg = f"🚫❌ [{idx+1}] Không tìm thấy ID cho URL: {url} (loại: {type_})"
+        site = str(row['site']).strip().lower()
+        schema = "" if delete_mode else row.get('script_schema', '')
+        account = accounts_dict.get(site)
+        if not account:
+            msg = f"🚫❌ [{idx+1}] Không tìm thấy tài khoản cho site: {site}"
             if send_log: send_log(msg)
-            results.append({"stt": idx+1, "url": url, "type": type_, "result": "Không tìm thấy ID"})
+            results.append({"stt": idx+1, "url": url, "site": site, "type": type_, "result": "Không tìm thấy tài khoản"})
             continue
-        ok, detail = update_schema(item_id, schema, type_)
+
+        item_id = get_id_from_url(url, type_, account)
+        if not item_id:
+            msg = f"🚫❌ [{idx+1}] Không tìm thấy ID cho URL: {url} (loại: {type_}, site: {site})"
+            if send_log: send_log(msg)
+            results.append({"stt": idx+1, "url": url, "site": site, "type": type_, "result": "Không tìm thấy ID"})
+            continue
+        ok, detail = update_schema(item_id, schema, type_, account)
         if ok:
             action = "Xoá" if delete_mode else "Cập nhật"
-            msg = f"✨✅ [{idx+1}] {action} schema cho {type_} ID {item_id} thành công"
+            msg = f"✨✅ [{idx+1}] {action} schema cho {type_} ID {item_id} thành công (site: {site})"
             result = "Thành công"
         else:
-            msg = f"🚫❌ [{idx+1}] Lỗi khi {('xoá' if delete_mode else 'cập nhật')} schema cho {type_} ID {item_id}"
+            msg = f"🚫❌ [{idx+1}] Lỗi khi {('xoá' if delete_mode else 'cập nhật')} schema cho {type_} ID {item_id} (site: {site})"
             result = f"Lỗi: {detail}"
             if send_log: send_log(f"💥⚠️ [{idx+1}] Chi tiết lỗi: {detail}")
         if send_log: send_log(msg)
-        results.append({"stt": idx+1, "url": url, "type": type_, "result": result})
+        results.append({"stt": idx+1, "url": url, "site": site, "type": type_, "result": result})
 
     return pd.DataFrame(results)
 
@@ -208,7 +245,7 @@ async def chencode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.chat_data[user_id] = {'waiting_for_file': 'chencode'}
     await update.message.reply_text(
-        "📤 Gửi file Excel (.xlsx) gồm 3 cột: url, script_schema, type (post/page/category). Gõ /cancel để dừng lại nếu muốn."
+        "📤 Gửi file Excel (.xlsx) gồm 2 sheet: 'accounts' (site, WP_API_URL, WP_USER, WP_APP_PASS) và 'data' (url, script_schema, type, site). Gõ /cancel để dừng lại nếu muốn."
     )
 
 async def xoascript(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -218,7 +255,7 @@ async def xoascript(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.chat_data[user_id] = {'waiting_for_file': 'xoascript'}
     await update.message.reply_text(
-        "📤 Gửi file Excel (.xlsx) gồm 2 cột: url, type (post/page/category) để xoá schema. Gõ /cancel để dừng lại nếu muốn."
+        "📤 Gửi file Excel (.xlsx) gồm 2 sheet: 'accounts' (site, WP_API_URL, WP_USER, WP_APP_PASS) và 'data' (url, type, site) để xoá schema. Gõ /cancel để dừng lại nếu muốn."
     )
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -259,7 +296,7 @@ async def handle_process_excel(update, context, file_path, user_id, delete_mode=
     try:
         df_result = await loop.run_in_executor(
             None,
-            lambda: process_excel(
+            lambda: process_excel_multi_account(
                 file_path,
                 send_log=lambda m: asyncio.run_coroutine_threadsafe(send_log(m), loop),
                 cancel_flag=cancel_flag,
@@ -286,7 +323,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏹️ Bạn không có tiến trình nào đang chạy hoặc chưa gửi file!")
 
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # Nếu cần vẫn giữ biến môi trường cho token
+    token = DEFAULT_TELEGRAM_TOKEN
+    app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("chencode", chencode))
     app.add_handler(CommandHandler("xoascript", xoascript))
     app.add_handler(CommandHandler("cancel", cancel))
