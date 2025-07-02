@@ -14,14 +14,12 @@ from datetime import datetime
 
 from requests.auth import HTTPBasicAuth
 
-# Load dotenv nếu vẫn cần (có thể giữ lại để bot hoạt động nếu không truyền file)
 load_dotenv()
 DEFAULT_TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 user_task = {}
 user_cancel = {}
 
-# ==== Đọc file Excel gồm 2 sheet: "accounts" và "data" ====
 def read_accounts_and_data(file_path):
     xls = pd.ExcelFile(file_path)
     sheet_names = [s.lower() for s in xls.sheet_names]
@@ -40,9 +38,6 @@ def read_accounts_and_data(file_path):
     return accounts_df, data_df
 
 def get_account_dict(accounts_df):
-    """
-    Chuyển sheet account thành dict theo 'site'
-    """
     acc_dict = {}
     for _, row in accounts_df.iterrows():
         key = str(row['site']).strip().lower()
@@ -53,7 +48,6 @@ def get_account_dict(accounts_df):
         }
     return acc_dict
 
-# ==== Các hàm hỗ trợ nhận account động ====
 def is_homepage_url(url):
     parsed = urlparse(url)
     path = parsed.path.rstrip('/')
@@ -63,7 +57,7 @@ def is_homepage_url(url):
 
 def get_homepage_id(account):
     api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/settings"
-    resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
+    resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
     if resp.status_code == 200:
         page_id = resp.json().get('page_on_front', 0)
         try:
@@ -83,14 +77,14 @@ def get_id_from_url(url, type_, account):
         slug = urlparse(url).path.rstrip('/').split('/')[-1]
         api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/{type_}s"
         params = {"per_page": 1, "slug": slug}
-        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
+        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
         if resp.status_code == 200 and resp.json():
             return resp.json()[0]['id']
     elif type_ == "category":
         slug = urlparse(url).path.rstrip('/').split('/')[-1]
         api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/categories"
         params = {"per_page": 1, "slug": slug}
-        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
+        resp = requests.get(api_endpoint, params=params, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
         if resp.status_code == 200 and resp.json():
             return resp.json()[0]['id']
     return None
@@ -98,7 +92,7 @@ def get_id_from_url(url, type_, account):
 def get_current_schema(post_id, type_, account):
     if type_ in ["post", "page"]:
         api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/{type_}s/{post_id}"
-        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
+        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
         if resp.status_code == 200:
             meta = resp.json().get('meta', {})
             inpost = meta.get('_inpost_head_script', {})
@@ -106,7 +100,7 @@ def get_current_schema(post_id, type_, account):
                 return inpost.get('synth_header_script', '') or ''
     elif type_ == "category":
         api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/categories/{post_id}"
-        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
+        resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
         if resp.status_code == 200:
             meta = resp.json().get('meta', {})
             return meta.get('category_schema', '') or ''
@@ -142,7 +136,7 @@ def update_schema(item_id, script_schema, type_, account):
                 }
             }
 
-        resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
+        resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
         if resp.status_code == 200:
             return True, None
         else:
@@ -154,27 +148,23 @@ def update_schema(item_id, script_schema, type_, account):
 
     elif type_ == "category":
         api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/categories/{item_id}"
-
-        # Bước 1: GET lại HTML description gốc
-        get_resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
+        get_resp = requests.get(api_endpoint, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
         html_description = ""
         if get_resp.status_code == 200:
             data = get_resp.json()
             html_description = data.get("description", "")
 
-        # Bước 2: PATCH meta để chèn script
         payload = {
             "meta": {
                 "category_schema": script_schema
             }
         }
-        patch_resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
+        patch_resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
 
-        # Bước 3: PATCH lại chính xác field description về giá trị HTML cũ
         fix_payload = {
             "description": html_description
         }
-        fix_resp = requests.patch(api_endpoint, json=fix_payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']))
+        fix_resp = requests.patch(api_endpoint, json=fix_payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
 
         if patch_resp.status_code == 200:
             return True, None
@@ -272,10 +262,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_drive(filename)
     await update.message.reply_text("📥 File đã nhận. Đang xử lý, bạn chờ chút... ⏳")
 
-    # Clear flag
     context.chat_data[user_id]['waiting_for_file'] = None
 
-    # Tạo và chạy task tương ứng
     task = None
     if waiting == 'chencode':
         task = asyncio.create_task(handle_process_excel(update, context, filename, user_id))
@@ -323,7 +311,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏹️ Bạn không có tiến trình nào đang chạy hoặc chưa gửi file!")
 
 def main():
-    # Nếu cần vẫn giữ biến môi trường cho token
     token = DEFAULT_TELEGRAM_TOKEN
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("chencode", chencode))
